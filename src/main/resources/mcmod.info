@@ -1,0 +1,15 @@
+[
+{
+  "modid": "tfruloading",
+  "name": "TFRU Loading Screen",
+  "description": "Declarative vector loading screen renderer for the TFRU modpack.",
+  "version": "${version}",
+  "mcversion": "${mcversion}",
+  "authorList": ["kuzuanpa"],
+  "credits": "",
+  "_license": "Source code: AGPLv3 (see LICENSE). Bundled assets: CC BY-NC-SA 4.0 (see LICENSE-ASSETS).",
+  "logoFile": "",
+  "screenshots": [],
+  "dependencies": []
+}
+]

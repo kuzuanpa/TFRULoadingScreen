@@ -1,0 +1,33 @@
+{
+  "_note": [
+    "TFRU loading screen HUD config. This file is NOT part of a scene: it drives the",
+    "chrome that sits on top of every scene - the top-left title, the bottom progress",
+    "bar and the tips line. The mod reads it once, at start-up, from",
+    "config/loadingscreen/loading_screen.json (written out with these defaults the",
+    "first time it is missing); it is never re-read while the game runs. Every field",
+    "is optional; delete one and the default below applies."
+  ],
+
+  "_license": "Bundled asset of TFRU Loading Screen, licensed under CC BY-NC-SA 4.0 (see LICENSE-ASSETS). The mod's source code is under AGPLv3 (see LICENSE).",
+
+  "labels": {
+    "title": { "text": "TFRU", "color": "#dbdff5" }
+  },
+
+  "progress": {
+    "statusText": "{status}",
+    "percentText": "{percent}%",
+    "textColor": "#c8d8e6",
+    "borderColor": "#0f171e",
+    "trackColor": "#1a2633",
+    "fillColor": "#ff993b"
+  },
+
+  "tips": {
+    "enabled": true,
+    "file": "tips.txt",
+    "color": "#aab6cc",
+    "delaySeconds": 3.0,
+    "changeSeconds": 12.0
+  }
+}

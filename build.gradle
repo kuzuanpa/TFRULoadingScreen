@@ -1,0 +1,114 @@
+buildscript {
+    repositories {
+        mavenCentral()
+        maven {
+            name = "forge"
+            url = "https://maven.minecraftforge.net/"
+        }
+    }
+    dependencies {
+        classpath('com.anatawa12.forge:ForgeGradle:1.2-1.1.+')
+    }
+}
+
+
+plugins {
+    id 'java-library'
+    id 'maven-publish'
+}
+
+apply plugin: 'forge'
+
+sourceCompatibility = 1.8
+targetCompatibility = 1.8
+
+version = project.version
+group = project.group
+
+configurations {
+    shade
+    compile.extendsFrom shade
+}
+
+minecraft {
+    version = project.minecraft_version + "-" + project.forge_version
+    runDir = "run"
+}
+
+dependencies {
+    // Both are supplied by the vanilla launcher at runtime; we only need them to compile the
+    // coremod transformer. They are intentionally not shaded into the jar.
+    compileOnly 'org.ow2.asm:asm-debug-all:5.0.3'
+    compileOnly 'net.minecraft:launchwrapper:1.12'
+}
+
+processResources {
+    inputs.property "version", project.version
+    inputs.property "mcversion", project.minecraft.version
+
+    filesMatching('mcmod.info') {
+        expand 'version': project.version, 'mcversion': project.minecraft.version
+    }
+}
+
+tasks.withType(JavaCompile) {
+    options.encoding = "UTF-8"
+}
+
+// This task creates a .jar file containing the source code of this mod.
+task sourcesJar(type: Jar, dependsOn: classes) {
+    classifier = "sources"
+    from sourceSets.main.allSource
+}
+// This task creates a .jar file containing a deobfuscated version of this mod, for other developers to use in a development environment.
+task devJar(type: Jar) {
+    classifier = "dev"
+    from sourceSets.main.output
+}
+
+// Creates the listed artifacts on building the mod.
+artifacts {
+    archives sourcesJar
+    archives devJar
+}
+
+jar {
+    manifest {
+        // Registers the coremod: the transformer rewrites Minecraft.loadScreen() so the vanilla
+        // Mojang-logo screen never draws, and FMLCorePluginContainsFMLMod tells FML that this same
+        // jar is also a regular @Mod.
+        attributes 'FMLCorePlugin': 'cn.kuzuanpa.tfruloading.coremod.TFRULoadingPlugin'
+        attributes 'FMLCorePluginContainsFMLMod': 'true'
+    }
+}
+
+reobf {
+    //reobf(coreJar) {
+    //	spec -> spec.classpath = sourceSets.main.compileClasspath
+    //}
+}
+
+// This block configures any maven publications you want to make.
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            groupId = 'cn.kuzuanpa'
+            // Add any other artifacts here that you would like to publish!
+            artifact(jar) {
+                builtBy build
+            }
+            artifact(sourcesJar) {
+                builtBy sourcesJar
+            }
+            artifact(devJar) {
+                builtBy devJar
+            }
+        }
+    }
+
+    // This block selects the repositories you want to publish to.
+    repositories {
+        mavenLocal()
+        // Add the repositories you want to publish to here.
+    }
+}
