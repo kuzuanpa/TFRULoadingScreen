@@ -16,31 +16,20 @@
 package cn.kuzuanpa.tfruloading.loadingscreen;
 
 /**
- * Static entry point injected into {@code Minecraft.loadScreen()} by the coremod transformer.
- *
- * <p>Lives outside the coremod package on purpose: everything here must be safe to run while
- * Minecraft is still booting, so it swallows every error. If anything fails the player just gets a
- * black window until the main menu, never a crash.
- *
- * <p>{@link #startScreen()} is injected into {@code Minecraft.startGame()}, right before FML starts
- * loading mods (the anchor BetterLoadingScreen uses). That is what keeps the black window short:
- * the first frame used to wait for the whole mod list to be constructed and pre-initialized, which
- * is 13 seconds on the real TFRU pack. {@link #pumpFrame()} is injected into FML's
- * {@code ProgressManager$ProgressBar.step}, which is the only main-thread heartbeat available while
- * a mod is busy loading.
+ * The three entry points the coremod injects into Minecraft: {@code startScreen()} into
+ * {@code startGame()}, {@code pumpFrame()} into FML's {@code ProgressBar.step(String)} and
+ * {@code renderFirstFrame()} into the replaced {@code loadScreen()}. All are best-effort: they swallow
+ * everything, because the worst acceptable outcome is the vanilla loading screen.
  */
 public final class LoadingScreenBridge {
 
     private LoadingScreenBridge() {
     }
 
-    /**
-     * Starts the loading screen as early as the display exists. Called from the coremod's
-     * {@code startGame} hook and again from the mod's construction event; it is idempotent.
-     */
+    /** Called from startGame() and again from the mod's construction event; idempotent. */
     public static void startScreen() {
         try {
-            if (LoadingScreenManager.isAbandoned()) return;
+            if (LoadingScreenManager.isHandedBack()) return;
             LoadingScreenManager.begin();
             FramePump.start();
         } catch (Throwable t) {
@@ -48,10 +37,6 @@ public final class LoadingScreenBridge {
         }
     }
 
-    /**
-     * One frame opportunity from the game thread. Injected into FML's progress-bar step, which fires
-     * thousands of times during a load - far more often than the mod lifecycle events.
-     */
     public static void pumpFrame() {
         try {
             LoadingScreenManager.pumpFrame();
@@ -60,7 +45,6 @@ public final class LoadingScreenBridge {
         }
     }
 
-    /** Called from the replaced {@code Minecraft.loadScreen()}. */
     public static void renderFirstFrame() {
         try {
             SplashConfig.forceDisableForgeSplash();
@@ -71,13 +55,9 @@ public final class LoadingScreenBridge {
         }
     }
 
-    /**
-     * Called from {@link ScreenOpenWatcher} the moment the game is about to show a screen. That is
-     * the end of the loading screen, so it stops drawing (and restores the GL state it touched).
-     */
     public static void onScreenOpened() {
         try {
-            LoadingScreenManager.abandon();
+            LoadingScreenManager.handBackDisplay();
         } catch (Throwable t) {
             System.err.println("[tfruloading] could not hand the display back: " + t);
         }

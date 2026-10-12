@@ -18,18 +18,7 @@ package cn.kuzuanpa.tfruloading.loadingscreen;
 import net.minecraft.client.gui.FontRenderer;
 import org.lwjgl.opengl.GL11;
 
-/**
- * The loading screen chrome that is not part of any scene: the bottom progress bar and the tips
- * line under it.
- *
- * <p>Colours and both text templates come from {@link HudConfig}, so a pack can rebrand the bar
- * without touching the film. Geometry is expressed as fractions of the GUI, exactly like the old
- * hard-coded version, so the bar keeps its proportions on every resolution.
- *
- * <p>Everything here is immediate mode and only ever touches {@code GL11} plus the {@link
- * FontRenderer} it is handed: this runs on the frame-pump thread as well as on the game thread (see
- * {@link LoadingScreenManager#renderFrame(boolean)}).
- */
+/** Progress bar, status/percent text and the tip line, laid out in screen space. */
 final class HudRenderer {
 
     private static final float BAR_WIDTH = 0.70f;
@@ -50,13 +39,6 @@ final class HudRenderer {
     private HudRenderer() {
     }
 
-    /**
-     * Draws the progress bar (with its label) and, when {@code tip} is non-null, the tips line.
-     *
-     * @param status  the loading status, e.g. {@code "Pre-initialization: GregTech"}.
-     * @param percent loading progress, 0..1.
-     * @param tip     the tip to show, or null / empty for none.
-     */
     static void draw(int width, int height, FontRenderer font, Scene scene, HudConfig hud,
                      String status, float percent, String tip) {
         if (width <= 0 || height <= 0) return;
@@ -66,8 +48,6 @@ final class HudRenderer {
         float x = (width - barWidth) / 2f;
         float y = height - barHeight - height * BAR_BOTTOM;
 
-        // The bar is drawn after the scene, which leaves GL_BLEND off; turn it back on so the
-        // configured alphas mean something (and so both draw paths agree).
         GL11.glEnable(GL11.GL_BLEND);
         GL11.glBlendFunc(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA);
 
@@ -92,10 +72,6 @@ final class HudRenderer {
         }
     }
 
-    /**
-     * Fills {@code {status}} and {@code {percent}} in a progress text template. An unknown
-     * placeholder is left alone, so a template can also be plain static text.
-     */
     static String substitute(String template, String status, float percent) {
         if (template == null) return "";
         String out = template.replace("{status}", status == null ? "" : status);
@@ -118,7 +94,7 @@ final class HudRenderer {
         float[] rgb = SceneCore.color(scene, colourRef);
         GL11.glDisable(GL11.GL_TEXTURE_2D);
         GL11.glColor4f(rgb[0], rgb[1], rgb[2], clamp01(alpha));
-        // Immediate mode: this may run on the frame pump thread (see SceneRenderer.drawTriangles).
+
         GL11.glBegin(GL11.GL_TRIANGLES);
         GL11.glVertex2f(x, y + height);
         GL11.glVertex2f(x + width, y + height);

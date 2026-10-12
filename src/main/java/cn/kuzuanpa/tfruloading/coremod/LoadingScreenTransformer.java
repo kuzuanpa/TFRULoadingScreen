@@ -26,40 +26,19 @@ import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 
 /**
- * Rewrites three things:
+ * Rewrites {@code Minecraft.loadScreen()} into {@link LoadingScreenBridge#renderFirstFrame()}, inserts
+ * {@code startScreen()} before the first {@code FMLClientHandler.instance()} call (top of
+ * {@code startGame()}, before FML discovers mods), and injects {@code pumpFrame()} into
+ * {@code ProgressManager$ProgressBar.step(String)} - the only game-thread heartbeat while mods load.
  *
- * <ol>
- *   <li>the body of {@code Minecraft.loadScreen()} (the vanilla Mojang-logo screen) becomes a call
- *       into {@link cn.kuzuanpa.tfruloading.loadingscreen.LoadingScreenBridge} followed by a return.
- *       With Forge's splash disabled {@code SplashProgress.drawVanillaScreen()} calls that method,
- *       so this is exactly the point where the vanilla first frame used to be drawn.</li>
- *   <li>a call to {@code LoadingScreenBridge.startScreen()} is inserted before the first
- *       {@code FMLClientHandler.instance()} call, i.e. at the top of {@code startGame()} right after
- *       the window exists and right before FML starts discovering and constructing mods. This is the
- *       anchor BetterLoadingScreen uses for its first progress draw, and it is what keeps the black
- *       window short: {@code drawVanillaScreen()} only runs after every mod has been constructed and
- *       pre-initialized (13 seconds on the real TFRU pack).</li>
- *   <li>a call to {@code LoadingScreenBridge.pumpFrame()} is inserted at the top of FML's
- *       {@code ProgressManager$ProgressBar.step(String)}. Mod lifecycle events alone are not enough
- *       - the real pack fires none at all for 55 seconds - but FML's progress bars are stepped
- *       thousands of times during a load, on the game thread, which is the only thread allowed to
- *       draw (see the failed shared-context attempt in ROADMAP §2.13).</li>
- * </ol>
- *
- * <p>Finding that method is the whole trick, and the first cut got it wrong: in a real client the
- * coremod transformer runs *before* FML's deobfuscation transformer, so the class is still
- * notch-obfuscated ({@code bao.aj()V}) and neither the MCP name ({@code loadScreen}) nor the SRG
- * name ({@code func_71357_I}) matches - the real client log said
- * "Minecraft.loadScreen was not found" and silently kept the vanilla screen. The method is therefore
- * matched by <em>shape</em> as a fallback: it is the only no-arg method that sets up an ortho
- * projection and then flushes GL ({@code GL11.glOrtho} + {@code GL11.glFlush}). LWJGL is never
- * obfuscated, so the shape is stable at every stage of the transform chain. (Matching on the
- * declared {@code LWJGLException} does <em>not</em> work: the vanilla 1.7.10 method declares none.)
+ * <p>{@code loadScreen} is found by name, or by shape when this runs before FML's deobfuscation: it is
+ * the only no-arg method calling both {@code GL11.glOrtho} and {@code GL11.glFlush}. Class names reach
+ * transformers dotted, so both forms are compared.
  */
 public class LoadingScreenTransformer implements IClassTransformer, Opcodes {
 
     private static final String TARGET = "net.minecraft.client.Minecraft";
-    private static final String TARGET_NOTCH = "bao";   // the notch name of Minecraft in 1.7.10
+    private static final String TARGET_NOTCH = "bao";
     private static final String BRIDGE = "cn/kuzuanpa/tfruloading/loadingscreen/LoadingScreenBridge";
     private static final String BRIDGE_METHOD = "renderFirstFrame";
     private static final String BRIDGE_START = "startScreen";
@@ -67,7 +46,6 @@ public class LoadingScreenTransformer implements IClassTransformer, Opcodes {
     private static final String PROGRESS_BAR = "cpw/mods/fml/common/ProgressManager$ProgressBar";
     private static final String FML_CLIENT_HANDLER = "cpw/mods/fml/client/FMLClientHandler";
     private static final String FML_INSTANCE = "instance";
-    private static final String LWJGL_EXCEPTION = "org/lwjgl/LWJGLException";
     private static final String GL11 = "org/lwjgl/opengl/GL11";
 
     private static final String GL_ORTHO = "glOrtho";
@@ -90,15 +68,6 @@ public class LoadingScreenTransformer implements IClassTransformer, Opcodes {
         return isTarget(name, transformedName, TARGET) || isTarget(name, transformedName, TARGET_NOTCH);
     }
 
-    /**
-     * Compares a launch-class-loader class name with a dotted name.
-     *
-     * <p>This matters and bit us once: {@code LaunchClassLoader} hands transformers the <em>dotted</em>
-     * binary name ({@code cpw.mods.fml.common.ProgressManager$ProgressBar}), while the internal name
-     * uses slashes. The first cut compared against the slash form, silently never matched the progress
-     * bar, and the loading screen fell back to "one frame per mod lifecycle event" (0-7 fps in the
-     * real client, see ROADMAP §2.13.5). Accept both forms.
-     */
     private static boolean isTarget(String name, String transformedName, String dotted) {
         return sameClass(name, dotted) || sameClass(transformedName, dotted);
     }
@@ -114,7 +83,7 @@ public class LoadingScreenTransformer implements IClassTransformer, Opcodes {
         new ClassReader(basicClass).accept(node, 0);
 
         boolean touched = replaceLoadScreen(node);
-        touched |= installEarlyPumpHook(node);
+        touched |= installStartScreenHook(node);
         if (!touched) return basicClass;
 
         ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
@@ -122,11 +91,6 @@ public class LoadingScreenTransformer implements IClassTransformer, Opcodes {
         return cw.toByteArray();
     }
 
-    /**
-     * Adds a frame opportunity to every FML progress-bar step. {@code step} is called from the game
-     * thread by FML and by any mod that reports progress, so this is the heartbeat that keeps the
-     * picture moving while a mod is inside its own long handler.
-     */
     private byte[] patchProgressBar(byte[] basicClass) {
         ClassNode node = new ClassNode();
         new ClassReader(basicClass).accept(node, 0);
@@ -135,7 +99,7 @@ public class LoadingScreenTransformer implements IClassTransformer, Opcodes {
             if (!"step".equals(m.name) || !"(Ljava/lang/String;)V".equals(m.desc)) continue;
             AbstractInsnNode first = m.instructions.getFirst();
             if (first instanceof MethodInsnNode && BRIDGE.equals(((MethodInsnNode) first).owner)) {
-                return basicClass; // already hooked by a previous pass
+                return basicClass;
             }
             m.instructions.insertBefore(first,
                     new MethodInsnNode(INVOKESTATIC, BRIDGE, BRIDGE_PUMP, "()V", false));
@@ -152,7 +116,6 @@ public class LoadingScreenTransformer implements IClassTransformer, Opcodes {
         return basicClass;
     }
 
-    /** Returns true when {@code loadScreen} was found and rewritten. */
     private boolean replaceLoadScreen(ClassNode node) {
         if (alreadyReplaced(node)) return true;
 
@@ -182,7 +145,6 @@ public class LoadingScreenTransformer implements IClassTransformer, Opcodes {
         return true;
     }
 
-    /** True when a previous pass already rewrote {@code loadScreen} into our bridge call. */
     private static boolean alreadyReplaced(ClassNode node) {
         for (MethodNode m : node.methods) {
             if (!"()V".equals(m.desc)) continue;
@@ -194,12 +156,8 @@ public class LoadingScreenTransformer implements IClassTransformer, Opcodes {
         return false;
     }
 
-    /**
-     * Inserts {@code LoadingScreenBridge.startScreen()} before the first
-     * {@code FMLClientHandler.instance()} call in the class. {@code FMLClientHandler} is FML code and
-     * therefore never obfuscated, so the anchor holds in notch, SRG and MCP states alike.
-     */
-    private boolean installEarlyPumpHook(ClassNode node) {
+    /** Inserts the start hook before the first FMLClientHandler.instance() call in the class. */
+    private boolean installStartScreenHook(ClassNode node) {
         for (MethodNode m : node.methods) {
             for (AbstractInsnNode insn = m.instructions.getFirst(); insn != null; insn = insn.getNext()) {
                 if (!(insn instanceof MethodInsnNode)) continue;
@@ -209,7 +167,7 @@ public class LoadingScreenTransformer implements IClassTransformer, Opcodes {
                 if (previous instanceof MethodInsnNode
                         && BRIDGE.equals(((MethodInsnNode) previous).owner)
                         && BRIDGE_START.equals(((MethodInsnNode) previous).name)) {
-                    return true; // a previous pass already hooked this call site
+                    return true;
                 }
 
                 m.instructions.insertBefore(call,
@@ -224,7 +182,7 @@ public class LoadingScreenTransformer implements IClassTransformer, Opcodes {
         return false;
     }
 
-    /** MCP name in a dev workspace, SRG name in a production run that has already been remapped. */
+    /** MCP name in a dev workspace, SRG name once FML has deobfuscated. */
     private static MethodNode findByName(ClassNode node) {
         for (MethodNode m : node.methods) {
             if (!"()V".equals(m.desc)) continue;
@@ -233,11 +191,7 @@ public class LoadingScreenTransformer implements IClassTransformer, Opcodes {
         return null;
     }
 
-    /**
-     * Name-agnostic fallback; see the class javadoc. Requires both GL11.glOrtho and GL11.glFlush in
-     * the same no-arg method: that pair is loadScreen's signature. The other GL-flushing no-arg
-     * method in Minecraft is the main tick loop, which does not touch the projection matrix.
-     */
+    /** Name-agnostic fallback: loadScreen is the only no-arg method using both glOrtho and glFlush. */
     private static MethodNode findByShape(ClassNode node) {
         for (MethodNode m : node.methods) {
             if (!"()V".equals(m.desc)) continue;

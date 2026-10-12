@@ -28,27 +28,13 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
 
-/**
- * The tips line at the bottom of the loading screen, ported from BetterLoadingScreen's
- * {@code tips.txt}.
- *
- * <p>The file is one tip per line, UTF-8; blank lines and lines starting with {@code #} are ignored
- * (so the format header can live in the file). Like the HUD config, the file is read once at
- * initialization from {@code config/loadingscreen/} (and written there from the bundled default when
- * it is missing), and it is never re-read while the game runs.
- *
- * <p>Which tip shows is a <em>pure function of the elapsed load time</em>: a fixed-seed shuffle is
- * laid out once, and {@link #at(float)} indexes into it. That makes a screenshot of a given moment
- * reproducible, and means a dropped frame cannot desynchronise the tips from the story.
- */
+/** The tip deck for this run: the configured tips file, shuffled once at start-up. */
 final class Tips {
 
     private static final Charset UTF8 = Charset.forName("UTF-8");
 
-    /** Length of the pre-shuffled bag; long enough that a load would have to run for hours to wrap. */
     private static final int SEQUENCE = 4096;
 
-    /** Fixed so the same elapsed time always shows the same tip, screenshot to screenshot. */
     private static final long SEED = 0x7F2A9C31L;
 
     private static final String[] NONE = new String[0];
@@ -67,19 +53,17 @@ final class Tips {
         this.sequence = sequence;
     }
 
-    /** An empty deck: nothing is ever shown (tips disabled or the file had no usable line). */
     static Tips none(HudConfig hud) {
         return new Tips(false, hud.tipsColor(), hud.tipsDelay(), hud.tipsChange(), NONE);
     }
 
-    /** Reads the deck described by {@code hud}, writing the bundled default out when it is missing. */
     static Tips load(File gameDir, HudConfig hud) {
         if (!hud.tipsEnabled()) return none(hud);
         String name = hud.tipsFileName();
         File file = HudConfig.tipsFileFor(gameDir, name);
         List<String> lines = read(file);
         if (lines.isEmpty() && !file.isFile()) {
-            // First run with this name: lay the bundled default down so it can be edited.
+
             writeDefault(file);
             lines = read(file);
         }
@@ -94,10 +78,6 @@ final class Tips {
         return colorRef;
     }
 
-    /**
-     * The tip for a given number of seconds of loading, or null when there is nothing to show yet
-     * (tips off, no file, or still inside the lead-in delay).
-     */
     String at(float elapsedSeconds) {
         if (!enabled || sequence.length == 0) return null;
         if (elapsedSeconds < delay) return null;
@@ -106,7 +86,6 @@ final class Tips {
         return sequence[index % sequence.length];
     }
 
-    /** Reads a tips file, skipping blanks and {@code #} comments. Never throws. */
     private static List<String> read(File file) {
         List<String> lines = new ArrayList<String>();
         if (file == null || !file.isFile()) return lines;
@@ -145,11 +124,6 @@ final class Tips {
         }
     }
 
-    /**
-     * Lays the tips out as a fixed-seed shuffle bag: whole shuffled passes one after another, with
-     * each pass rotated if it would otherwise start with the line the previous pass ended on. No tip
-     * repeats until every other tip has been shown, and the order is reproducible.
-     */
     private static String[] shuffle(List<String> lines) {
         int n = lines.size();
         String[] source = lines.toArray(new String[n]);
@@ -179,8 +153,6 @@ final class Tips {
         try {
             if (closeable instanceof InputStream) ((InputStream) closeable).close();
             else if (closeable instanceof OutputStream) ((OutputStream) closeable).close();
-        } catch (IOException ignored) {
-            // nothing useful to do
-        }
+        } catch (IOException ignored) { }
     }
 }

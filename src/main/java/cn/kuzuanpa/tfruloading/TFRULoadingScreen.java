@@ -21,16 +21,7 @@ import cn.kuzuanpa.tfruloading.loadingscreen.ScreenOpenWatcher;
 import cpw.mods.fml.common.Mod;
 import cpw.mods.fml.common.event.FMLConstructionEvent;
 
-/**
- * TFRU Loading Screen.
- *
- * <p>Scenes are tiny declarative vector files. This mod replaces the vanilla/Forge loading screen with
- * one of those scenes via a coremod transformer
- * ({@code coremod/TFRULoadingPlugin}), and drives the progress bar from FML's mod lifecycle.
- *
- * <p>The scene, the HUD config and the tips are read once from {@code config/loadingscreen/} when the
- * screen starts (see {@code LoadingScreenManager}).
- */
+/** Regular @Mod side: attaches progress reporting, starts the screen and watches for GUI opens. */
 @Mod(modid = TFRULoadingScreen.MOD_ID, name = TFRULoadingScreen.MOD_NAME,
         version = TFRULoadingScreen.VERSION, acceptedMinecraftVersions = "1.7.10")
 public final class TFRULoadingScreen {
@@ -41,16 +32,11 @@ public final class TFRULoadingScreen {
 
     @Mod.EventHandler
     public void construct(FMLConstructionEvent event) {
-        // Register on every mod's event bus before preInit starts firing.
         LoadingProgress.attach();
-        // The coremod already started the screen from Minecraft.startGame(); this is the fallback for
-        // a client where that hook could not be installed, plus the moment we start watching for the
-        // main menu (which ends the loading screen).
         LoadingScreenBridge.startScreen();
         try {
             ScreenOpenWatcher.register();
         } catch (Throwable t) {
-            // client-only class (GuiOpenEvent); a dedicated server must not care
             System.err.println("[tfruloading] could not watch for GUI opens: " + t);
         }
     }

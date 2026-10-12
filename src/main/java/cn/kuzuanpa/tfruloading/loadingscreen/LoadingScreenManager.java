@@ -24,70 +24,51 @@ import org.lwjgl.opengl.Display;
 import java.io.File;
 
 /**
- * Owns the in-game loading screen: which scene is playing, the progress text, and the actual
- * frame draw.
- *
- * <p>Minecraft does not run its render loop while mods load, so the loading screen has to be pushed
- * from somewhere. There are two sources, and both are needed:
- *
- * <ul>
- *   <li>{@link FramePump}: a second thread with its own GL context at 60 fps, so the loop frames
- *       (fire, steam, anvil) keep animating even while a mod spends a minute inside one lifecycle
- *       handler. It owns everything it touches; see that class for why the game thread's context and
- *       caches are never disturbed.</li>
- *   <li>the game thread: FML mod lifecycle events ({@link LoadingProgress}) and every step of FML's
- *       progress bars ({@code ProgressManager$ProgressBar.step}, hooked by the coremod), capped at
- *       {@value #MAX_FPS} fps. This is what runs when the pump is off or unavailable.</li>
- * </ul>
- *
- * <p>The two timelines are driven by {@link Director}: the loop frames follow wall-clock time, the
- * actual frames follow the progress bar's allowance. Both are pure functions of elapsed time plus
- * progress, so a frame that had to wait still shows the correct picture when it finally happens.
+ * Owns the loading screen: scene and progress state, and the frame source that draws it.
+ * The pump thread draws when it is up (see {@link FramePump}); otherwise the game thread does, and
+ * then only from here - never from inside another mod's loop, and never with the game's own font.
  */
 public final class LoadingScreenManager {
 
     private static final SceneRenderer RENDERER = new SceneRenderer();
     private static final String DEFAULT_SCENE = "tfru_intro";
 
-    /**
-     * Top frame rate for the game-thread fallback (frames pushed off a progress-bar step). The screen
-     * then shares the thread that is loading the game, so this is also an upper bound on what it can
-     * cost the load. It only applies when {@link FramePump} is not running.
-     */
     private static final int MAX_FPS = 20;
     private static final long FRAME_INTERVAL_NANOS = 1000000000L / MAX_FPS;
 
-    /** Every this many seconds the screen logs what it is showing; useful for the M7 real-client runs. */
     private static final long TELEMETRY_NANOS = 2000000000L;
 
-    /**
-     * Everything the screen draws, read once from {@code config/loadingscreen/} by {@link #loadConfig}
-     * on the first {@link #begin()} and held here for the rest of the run.
-     */
     private static Scene scene;
     private static Director director;
-    /** HUD config: the top-left labels, the progress bar colours/text and the tips settings. */
     private static HudConfig hud = new HudConfig();
-    /** The tips deck: the shuffled tips.txt lines for this run (empty when tips are off). */
     private static Tips tips;
+
     private static volatile String status = "Minecraft Initializing";
     private static volatile float percent;
-    private static boolean started;
     private static volatile boolean finished;
-    private static volatile boolean abandoned;
+    /** Set once the window has been handed back; makes {@link #handBackDisplay()} a one-shot. */
+    private static volatile boolean handedBack;
+    /** Set by {@link #handBackDisplay()}, consumed by {@link #applyPendingResize()}. */
+    private static volatile boolean needsResize;
+    private static boolean started;
+    /** The thread Minecraft ticks on: the only thread allowed to draw outside the pump. */
+    private static volatile Thread gameThread;
+
     private static long tickNanos = System.nanoTime();
-    /** Wall clock of {@link #begin()}, used to time the tips rotation. */
     private static long screenStartNanos = System.nanoTime();
     private static long telemetryNanos = System.nanoTime();
     private static long lastFrameNanos;
     private static long telemetryFrames;
+    /** Window size the screen took over with, to realign the game at hand-over. */
+    private static int startDisplayWidth;
+    private static int startDisplayHeight;
 
     private LoadingScreenManager() {
     }
 
     /**
-     * Reads {@code config/loadingscreen/} and draws the first frame. Idempotent, so the earliest hook
-     * to fire wins and the configuration is read exactly once; callable from the earliest hook.
+     * Game thread only, and the earliest hook that has one. Reads the config once, and draws a first
+     * frame with the pump's font so that the pump thread is never the first to load a class.
      */
     public static synchronized void begin() {
         if (started) return;
@@ -100,34 +81,21 @@ public final class LoadingScreenManager {
         try {
             mc = Minecraft.getMinecraft();
         } catch (Throwable ignored) {
-            // not far enough into the game yet; the scene still loads from the jar
         }
         if (mc != null) {
             try {
-                // Second chance, in case the coremod's early write did not find the file.
-                // This has to happen before SplashProgress.start() reads it, which is why it lives
-                // here now: begin() runs from the coremod hook in startGame(), not from construction.
                 SplashConfig.disableForgeSplash(mc.mcDataDir);
             } catch (Throwable ignored) {
-                // non fatal
             }
         }
         loadConfig(mc);
 
-        // Show the first frame straight away on the game thread, so the window stops being black
-        // before FML even starts discovering mods (and before the pump thread has spun up).
+        gameThread = Thread.currentThread();
+        startDisplayWidth = Display.getWidth();
+        startDisplayHeight = Display.getHeight();
         if (!FramePump.isRunning()) renderFrame(false);
     }
 
-    /**
-     * Reads the scene, the HUD config ({@code config/loadingscreen/loading_screen.json}, written out
-     * from the bundled default when it is missing) and the tips deck the HUD points at.
-     *
-     * <p>This is the screen's one and only read of those files: it runs once, from the first
-     * {@link #begin()}, and the results stay in memory for the whole run - there is no reload path, so
-     * an edit on disk shows up on the next game launch. Every part falls back to a sane default on
-     * failure rather than taking the loading screen down.
-     */
     private static void loadConfig(Minecraft mc) {
         File gameDir = mc != null ? mc.mcDataDir : new File(".");
         try {
@@ -152,34 +120,28 @@ public final class LoadingScreenManager {
         director = new Director(scene);
     }
 
-    /**
-     * A frame opportunity: called from every mod lifecycle event and from every FML progress-bar
-     * step. Rate limited, so a step-heavy phase cannot turn into a hundred draws per second.
-     */
     public static synchronized void pumpFrame() {
-        frameOpportunity();
+        drawFrameIfDue();
     }
 
-    /** Progress report from the mod lifecycle hooks. */
+    /** Progress from the mod lifecycle hooks. Monotone: a later mod can report a lower fraction. */
     public static synchronized void setProgress(String text, float fraction) {
-        if (finished || abandoned) return;
+        if (finished || handedBack) return;
         status = text == null ? "" : text;
-        percent = fraction < 0f ? 0f : fraction > 1f ? 1f : fraction;
-        frameOpportunity();
+        float next = fraction < 0f ? 0f : fraction > 1f ? 1f : fraction;
+        if (next > percent) percent = next;
+        drawFrameIfDue();
     }
 
-    /** Draws, unless a frame was drawn within the last {@link #FRAME_INTERVAL_NANOS}. */
-    private static void frameOpportunity() {
-        if (!started || abandoned) return;
-        if (FramePump.isRunning()) return; // the pump owns the window while it is up
+    /** A frame opportunity from a progress-bar step: game thread only, and rate limited. */
+    private static void drawFrameIfDue() {
+        if (!started || handedBack) return;
+        if (FramePump.isRunning()) return;
+        if (Thread.currentThread() != gameThread) return;
         if (System.nanoTime() - lastFrameNanos < FRAME_INTERVAL_NANOS) return;
         renderFrame(false);
     }
 
-    /**
-     * Called once loading is complete. Banks the rest of the story so the frames that the tail (the
-     * resource reload between load complete and the main menu) still provides can play it out.
-     */
     public static synchronized void complete() {
         if (finished) return;
         percent = 1f;
@@ -194,30 +156,16 @@ public final class LoadingScreenManager {
     }
 
     /**
-     * The game is about to show a screen (the main menu, a crash report, a mod's config screen).
-     * That is the end of the loading screen: stop drawing and hand the window back, so a progress
-     * bar stepped after loading (world loading, a mod's lazy setup) can never paint over the game.
-     *
-     * <p>Also restores the pieces of GL state the screen touches. Forge's own splash does the same
-     * on the way out; it is cheap insurance for the frame the game draws next.
+     * Stops drawing and gives the window back. Runs inside {@code Minecraft.displayGuiScreen}, so it
+     * must call nothing that re-enters the GUI being opened - {@code Minecraft.resize} does exactly
+     * that, hence {@link #applyPendingResize()}.
      */
-    public static void abandon() {
-        abandoned = true;
+    public static void handBackDisplay() {
+        if (handedBack) return;
+        handedBack = true;
         FramePump.stop();
-        // The pump was the only thing watching the window, so the game may still be sized (and its
-        // off-screen framebuffer built) for the window it had at startup. Realign it here, on the game
-        // thread with the game's own context: this is exactly what Minecraft does on a resize, and it
-        // records the new size before the first frame the game lays out (the main menu).
-        if (FramePump.windowResizedSinceStart()) {
-            try {
-                Minecraft mc = Minecraft.getMinecraft();
-                int width = Display.getWidth();
-                int height = Display.getHeight();
-                if (mc != null && width > 0 && height > 0) mc.resize(width, height);
-            } catch (Throwable ignored) {
-                // no display / no context: the game will resize itself on its next frame anyway
-            }
-        }
+        needsResize = startDisplayWidth > 0 && Display.isCreated()
+                && (Display.getWidth() != startDisplayWidth || Display.getHeight() != startDisplayHeight);
         try {
             GL11.glClearColor(1f, 1f, 1f, 1f);
             GL11.glEnable(GL11.GL_DEPTH_TEST);
@@ -230,24 +178,35 @@ public final class LoadingScreenManager {
             GL11.glMatrixMode(GL11.GL_MODELVIEW);
             GL11.glLoadIdentity();
         } catch (Throwable ignored) {
-            // no context (yet): nothing to restore either
         }
     }
 
-    public static synchronized boolean isAbandoned() {
-        return abandoned;
+    /** Client tick: realigns the game's window size where no screen transition is in progress. */
+    public static synchronized void applyPendingResize() {
+        if (!needsResize) return;
+        needsResize = false;
+        try {
+            Minecraft mc = Minecraft.getMinecraft();
+            int width = Display.getWidth();
+            int height = Display.getHeight();
+            if (mc != null && width > 0 && height > 0) mc.resize(width, height);
+        } catch (Throwable t) {
+            System.err.println("[tfruloading] could not realign the window size: " + t);
+        }
+    }
+
+    public static synchronized boolean isHandedBack() {
+        return handedBack;
     }
 
     /**
-     * Draws one frame.
-     *
-     * <p>{@code pumped} says which GL context the frame belongs to: {@code true} draws into the pump
-     * thread's own context with the pump's private font, {@code false} draws into the game's context
-     * from the game thread. The two never draw at the same time - a thread that does not own the
-     * display is refused.
+     * Draws one frame into whichever context is current on this thread: the pump's own when the pump
+     * runs, the game's otherwise. Text always goes through {@link PumpFont} - the game's
+     * {@code FontRenderer} binds through its {@code TextureManager}, and Forge steps a progress bar
+     * from inside that map's iteration, so binding a texture there throws ConcurrentModificationException.
      */
-    static synchronized void renderFrame(boolean pumped) {
-        if (pumped != FramePump.isRunning()) return;
+    static synchronized void renderFrame(boolean pumpContext) {
+        if (pumpContext != FramePump.isRunning()) return;
 
         Minecraft mc;
         try {
@@ -259,23 +218,15 @@ public final class LoadingScreenManager {
 
         FontRenderer font = null;
         try {
-            font = pumped ? PumpFont.get(mc) : mc.fontRenderer;
+            font = PumpFont.get(mc);
         } catch (Throwable ignored) {
-            // not created yet on the very first frame
         }
 
-        // The pump swaps through Display.update(), which also tracks the window size, and the game
-        // thread's own field only follows on a resize it performs - so read the live size instead of
-        // trusting the possibly stale Minecraft field while pumping.
         int fbWidth = mc.displayWidth;
         int fbHeight = mc.displayHeight;
-        if (pumped && Display.getWidth() > 0 && Display.getHeight() > 0) {
+        if (Display.getWidth() > 0 && Display.getHeight() > 0) {
             fbWidth = Display.getWidth();
             fbHeight = Display.getHeight();
-            // The pump is the only thing looking at the window while it runs (the game thread is
-            // loading mods, not rendering), so keep Minecraft's own size fields current too: the main
-            // menu lays itself out from them the moment loading ends. A resize seen by the pump would
-            // otherwise be invisible to the game.
             mc.displayWidth = fbWidth;
             mc.displayHeight = fbHeight;
         }
@@ -285,19 +236,12 @@ public final class LoadingScreenManager {
         int w = res.getScaledWidth();
         int h = res.getScaledHeight();
 
-        // GL keeps the viewport per context and nobody resizes it for us, so a window drag would
-        // otherwise leave the picture drawn into the old rectangle.
         GL11.glViewport(0, 0, fbWidth, fbHeight);
 
-        // The director wants real wall time. dt used to be capped at 0.25s per frame "so a stall
-        // plays out over several frames", which silently ate every gap longer than a quarter second
-        // and cost the story 82 of the load's 100 seconds (ROADMAP §2.13). Nothing here needs the
-        // cap: the story can never run past what the progress bar paid for, so a long step just
-        // catches it up to the allowance ceiling, which is exactly the right frame.
         long now = System.nanoTime();
         float dt = (now - tickNanos) / 1000000000f;
         tickNanos = now;
-        if (!(dt > 0f)) dt = 0f; // also swallows NaN
+        if (!(dt > 0f)) dt = 0f;
         lastFrameNanos = now;
 
         GL11.glMatrixMode(GL11.GL_PROJECTION);
@@ -323,25 +267,21 @@ public final class LoadingScreenManager {
             RENDERER.render(scene, director.actualTime(), director.loopTime(), w, h, font, hud);
         }
 
-        // The chrome is config-driven (loading_screen.json) and drawn in screen space, on top of the
-        // film: the progress bar and, under it, the tips line.
         String tip = tips == null ? null : tips.at((now - screenStartNanos) / 1000000000f);
         HudRenderer.draw(w, h, font, scene, hud, status, percent, tip);
 
-        if (!pumped) {
-            // The pump thread swaps with Display.update() in its own loop; the game thread has to go
-            // through Minecraft so a resize is picked up.
+        if (!pumpContext) {
+            // Not Minecraft.updateDisplay(): that calls Minecraft.resize on a resize, re-entering the
+            // GUI that is being opened right now.
             try {
-                mc.func_147120_f(); // updateDisplay(): swaps the back buffer, and handles a resize
+                Display.update();
             } catch (Throwable ignored) {
-                // if the display is not ready yet, skip this frame
             }
         }
 
         logTelemetry(now);
     }
 
-    /** Prints one line every couple of seconds so a real pack can be measured without a profiler. */
     private static void logTelemetry(long now) {
         telemetryFrames++;
         long elapsed = now - telemetryNanos;
@@ -358,5 +298,4 @@ public final class LoadingScreenManager {
                 + Math.round(percent * 100f) + "% | allowance " + allowance + "s | " + verdict
                 + " | " + status);
     }
-
 }

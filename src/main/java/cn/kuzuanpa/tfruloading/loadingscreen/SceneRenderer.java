@@ -28,30 +28,19 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Draws a {@link Scene} with the Minecraft 1.7.10 fixed-function pipeline.
- *
- * <p>Geometry and animation come from {@link SceneCore} (the same maths the web previewer uses);
- * this class only maps virtual canvas units onto GUI pixels, pushes triangles with immediate mode
- * (the Tessellator is thread-bound in this pack) and draws text with whichever {@link FontRenderer}
- * the caller owns.
+ * Draws a scene in immediate mode on purpose: the Tessellator is thread-bound in this pack (GTNHLib)
+ * and the pump thread draws too. Images are uploaded by hand, never through {@code RenderEngine}.
  */
 public class SceneRenderer {
 
     private Scene cachedScene;
     private final Map<String, SceneCore.Shape> shapes = new HashMap<String, SceneCore.Shape>();
     private final Map<String, float[][]> glowShapes = new HashMap<String, float[][]>();
-    /** Uniform camera scale of the frame being drawn, for keeping the glow a constant size on screen. */
+
     private float cameraScale = 1f;
     private int logoTexture = 0;
     private boolean logoTextureTried = false;
 
-    /**
-     * Draws one frame.
-     *
-     * <p>{@code time} is the actual (progress-driven) timeline; {@code loopTime} is the position
-     * inside the scene's loop timeline. Pass {@link SceneCore#NO_LOOP} to draw the actual layer
-     * only, which is what a scene without {@code loop} expects.
-     */
     public void render(Scene scene, float time, float loopTime, int guiWidth, int guiHeight,
                        FontRenderer font, HudConfig hud) {
         if (scene == null || scene.nodes == null) return;
@@ -104,18 +93,14 @@ public class SceneRenderer {
 
         GL11.glPopMatrix();
 
-        // The final-frame logo is an IMAGE, drawn in screen space (no camera). It is the one
-        // texture in the film; everything else stays four primitives.
         drawLogoImage(scene, time, ox, oy, fit);
 
         GL11.glDisable(GL11.GL_BLEND);
         GL11.glColor4f(1f, 1f, 1f, 1f);
     }
 
-    // ------------------------------------------------------------------ internals
-
     private SceneCore.Shape shapeOf(Scene.Node node, SceneCore.State st) {
-        // Morphing polylines need fresh geometry every frame; everything else is static.
+
         if (st != null && st.pts != null) return SceneCore.build(node, st);
         SceneCore.Shape sh = shapes.get(node.id);
         if (sh == null) {
@@ -125,10 +110,6 @@ public class SceneRenderer {
         return sh;
     }
 
-    /**
-     * Applies the scene camera in screen space. Screen coords are already
-     * {@code ox + world * fit}, so the pivot and the offset are converted the same way.
-     */
     private static void applyCamera(SceneCore.CameraState cam, float ox, float oy, float fit) {
         if (cam.dx == 0f && cam.dy == 0f && cam.rot == 0f && cam.sx == 1f && cam.sy == 1f) return;
         float px = ox + cam.pivotX * fit;
@@ -155,26 +136,10 @@ public class SceneRenderer {
         return v;
     }
 
-    /**
-     * Glow shape, mirroring preview/render.js: the silhouette is grown outward in
-     * {@code GLOW_BANDS} rings up to {@code GLOW_REACH} (in <em>screen</em> pixels - a canvas shadow
-     * does not shrink when the camera pulls back, so {@link #drawGlow} divides by the camera and node
-     * scale) with an additive alpha that falls off quadratically from {@code GLOW_PEAK} at the edge to
-     * zero at the reach.
-     *
-     * <p>The preview draws the same halo as a canvas shadow with {@code shadowBlur = 26}; the numbers
-     * here were tuned to match its radial brightness profile.
-     */
     private static final int GLOW_BANDS = 12;
     private static final float GLOW_REACH = 29f;
     private static final float GLOW_PEAK = 0.26f;
 
-    /**
-     * Additive halo behind a glowing element, built from the shape's own silhouette.
-     *
-     * <p>Independent of the element's size and uniform in every direction, which is what makes small
-     * sparks and a 1200-unit planet rim both read as "a glow" instead of as displaced copies.
-     */
     private void drawGlow(Scene scene, Scene.Node node, SceneCore.State st, SceneCore.Shape sh,
                           float ox, float oy, float fit, String fillRef, String strokeRef) {
         List<float[]> outline = sh.outline;
@@ -184,8 +149,6 @@ public class SceneRenderer {
         float[] rgb = SceneCore.color(scene, ref);
         boolean closed = !"poly".equals(node.type) || Boolean.TRUE.equals(node.closed);
 
-        // Screen-constant halo: undo the camera and the node's own scale, then quantise so the (fairly
-        // expensive) stroke geometry can still be cached while the camera drifts.
         float nodeScale = (float) Math.sqrt(Math.max(1e-4, Math.abs(st.sx) * Math.abs(st.sy)));
         int step = Math.max(1, Math.round(15f / (cameraScale * nodeScale)));
         float[][] layers = glowLayers(node, outline, closed, st.pts != null, step);
@@ -198,7 +161,6 @@ public class SceneRenderer {
         GL11.glBlendFunc(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA);
     }
 
-    /** The halo layers for a node, cached when its geometry is static (morphing shapes rebuild). */
     private float[][] glowLayers(Scene.Node node, List<float[]> outline, boolean closed, boolean morphing,
                                  int step) {
         String key = node.id + '#' + step;
@@ -215,8 +177,7 @@ public class SceneRenderer {
                     reach * (i + 1) / GLOW_BANDS);
         }
         if (!morphing) {
-            // The key carries the quantised scale, so the cache would otherwise grow with every zoom
-            // step of the film; 512 entries is several frames' worth of geometry and stays small.
+
             if (glowShapes.size() > 512) glowShapes.clear();
             glowShapes.put(key, layers);
         }
@@ -227,10 +188,7 @@ public class SceneRenderer {
         if (tris == null || tris.length < 6) return;
         GL11.glDisable(GL11.GL_TEXTURE_2D);
         GL11.glColor4f(rgb[0], rgb[1], rgb[2], clamp01(alpha));
-        // Immediate mode on purpose. The Tessellator is off limits on any thread but the game thread
-        // in this pack (GTNHLib redirects it to a thread-bound manager, which is what killed the first
-        // frame pump: "Tried to get the Tessellator off the main thread when not capturing"), and this
-        // renderer is the one piece that may run on the pump thread.
+
         GL11.glBegin(GL11.GL_TRIANGLES);
         for (int i = 0; i + 1 < tris.length; i += 2) {
             GL11.glVertex2f(tris[i], tris[i + 1]);
@@ -239,15 +197,6 @@ public class SceneRenderer {
         GL11.glEnable(GL11.GL_TEXTURE_2D);
     }
 
-    /**
-     * Draws one {@code text} node.
-     *
-     * <p>A node's text and colour can be overridden from {@link HudConfig} (keyed by node id), which
-     * is how the top-left title and the era labels became configurable without touching the film.
-     * A configured value wins outright, including over a colour keyframe on the same node: the
-     * config is the author's explicit statement about that label. Only {@code alpha} keeps animating
-     * (the fade-outs), because that is composition, not branding.
-     */
     private static void drawText(Scene scene, Scene.Node node, SceneCore.State st,
                                  float ox, float oy, float fit, FontRenderer font, HudConfig hud) {
         if (font == null || node.at == null) return;
@@ -287,8 +236,6 @@ public class SceneRenderer {
         return v < 0f ? 0f : v > 1f ? 1f : v;
     }
 
-    // ------------------------------------------------------------------ final-frame logo image
-
     private void drawLogoImage(Scene scene, float time, float ox, float oy, float fit) {
         Scene.Logo lg = scene.logo;
         if (lg == null || lg.at == null || lg.size == null || lg.at.length < 2 || lg.size.length < 2) return;
@@ -306,7 +253,7 @@ public class SceneRenderer {
         GL11.glEnable(GL11.GL_BLEND);
         GL11.glBlendFunc(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA);
         GL11.glColor4f(1f, 1f, 1f, clamp01(alpha));
-        // Rows were uploaded top-down, so v=0 is the image's top edge.
+
         GL11.glBegin(GL11.GL_QUADS);
         GL11.glTexCoord2f(0f, 0f); GL11.glVertex2f(x0, y0);
         GL11.glTexCoord2f(1f, 0f); GL11.glVertex2f(x1, y0);
@@ -317,11 +264,6 @@ public class SceneRenderer {
         GL11.glColor4f(1f, 1f, 1f, 1f);
     }
 
-    /**
-     * Loads {@code assets/tfruloading/textures/<name>.png} straight out of the jar and uploads it
-     * as a GL texture. Done by hand (not via the resource pack / RenderEngine) so the loading
-     * screen never depends on the resource system being ready; any failure just means "no logo".
-     */
     private int logoTexture() {
         if (logoTextureTried) return logoTexture;
         logoTextureTried = true;
@@ -344,8 +286,7 @@ public class SceneRenderer {
                     buf.put((byte) ((argb >>> 24) & 0xff));
                 }
             }
-            // See PumpFont: ByteBuffer.flip() must be called through Buffer or the class file ends up
-            // asking for the Java 9 covariant signature, which does not exist on Java 8.
+
             ((java.nio.Buffer) buf).flip();
             int tex = GL11.glGenTextures();
             GL11.glBindTexture(GL11.GL_TEXTURE_2D, tex);
@@ -357,7 +298,7 @@ public class SceneRenderer {
                     GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, buf);
             logoTexture = tex;
         } catch (Throwable t) {
-            logoTexture = 0;   // a missing/broken logo must never take the loading screen down
+            logoTexture = 0;
         } finally {
             if (in != null) try { in.close(); } catch (Exception ignored) { }
         }

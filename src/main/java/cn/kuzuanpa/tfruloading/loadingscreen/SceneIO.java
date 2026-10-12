@@ -25,12 +25,7 @@ import java.io.InputStreamReader;
 import java.io.Reader;
 import java.nio.charset.Charset;
 
-/**
- * Loads a {@link Scene} from the bundled jar resources or from a file on disk.
- *
- * <p>Pure Java (no Minecraft imports) so it can be unit tested off-line and so the exact
- * same parsing path is used by the in-game renderer.
- */
+/** Reads a scene from the pack's config directory, falling back to the copy bundled in the jar. */
 public final class SceneIO {
 
     private static final Gson GSON = new Gson();
@@ -40,16 +35,10 @@ public final class SceneIO {
     private SceneIO() {
     }
 
-    /** Parses a scene straight from a reader. */
     public static Scene parse(Reader reader) {
         return GSON.fromJson(reader, Scene.class);
     }
 
-    /**
-     * Loads a scene bundled in the mod jar, e.g. {@code bundled("blacksmith")}.
-     *
-     * @throws IOException if the resource is missing or unreadable.
-     */
     public static Scene bundled(String name) throws IOException {
         InputStream in = SceneIO.class.getResourceAsStream(BUNDLED_ROOT + name + ".json");
         if (in == null) {
@@ -62,7 +51,6 @@ public final class SceneIO {
         }
     }
 
-    /** Loads a scene from disk. */
     public static Scene fromFile(File file) throws IOException {
         InputStream in = new FileInputStream(file);
         try {
@@ -72,11 +60,6 @@ public final class SceneIO {
         }
     }
 
-    /**
-     * Reads a scene from {@code sceneDir} (a pack's {@code config/loadingscreen/scenes/}), falling
-     * back to the copy bundled in the jar when the pack does not ship one. Read once, at
-     * initialization - see {@link LoadingScreenManager#begin()}.
-     */
     public static Scene load(File sceneDir, String name) throws IOException {
         File onDisk = new File(sceneDir, name + ".json");
         if (onDisk.isFile()) {
@@ -88,8 +71,6 @@ public final class SceneIO {
     private static void closeQuietly(InputStream in) {
         try {
             in.close();
-        } catch (IOException ignored) {
-            // nothing useful to do here
-        }
+        } catch (IOException ignored) { }
     }
 }

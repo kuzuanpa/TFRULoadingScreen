@@ -30,23 +30,12 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * A private copy of Minecraft's ASCII font for the frame pump thread.
+ * A private copy of Minecraft's font for the pump thread: own GL texture, own glyph lookup, so
+ * drawing never goes through the game's {@code TextureManager} or {@code FontRenderer}.
  *
- * <p>The pump must never touch the game's {@code FontRenderer} or {@code TextureManager}: those keep
- * their own idea of which texture is bound (MCPatcher/angelica/nechar all cache GL state in Java), and
- * a second thread binding textures through them is exactly the kind of thing that produced the
- * "half the glyphs turned into solid boxes" damage in the first pump attempt.
- *
- * <p>So this is a self-contained {@link FontRenderer} with its own GL texture, uploaded in the pump
- * thread's context - the same approach Forge's splash screen uses for its {@code SplashFontRenderer},
- * which is why it is safe to use from a thread that is not the game thread.
- *
- * <p>Forge patches {@link FontRenderer} with a {@code bindTexture(ResourceLocation)} seam precisely
- * so a private font can exist, and the unicode path (any character outside the ASCII sheet, e.g. the
- * Chinese tips) goes through that same seam: {@code loadGlyphTexture(page)} binds
- * {@code textures/font/unicode_page_XX.png}. {@link OwnRenderer#bindTexture(ResourceLocation)}
- * therefore uploads those pages on demand too, into this context, instead of letting them fall
- * through to the game's {@code TextureManager}.
+ * <p>Built on the game thread (see {@link LoadingScreenManager#begin()}): the first touch of
+ * {@code FontRenderer} runs the pack's whole coremod transformer chain, which must not happen on the
+ * pump thread.
  */
 final class PumpFont {
 
@@ -57,14 +46,12 @@ final class PumpFont {
     private static int texture;
     private static FontRenderer renderer;
 
-    /** Uploaded unicode glyph pages, keyed by resource path. Bounded; see {@link #textureFor}. */
     private static final int MAX_PAGES = 64;
     private static final Map<String, Integer> PAGES = new HashMap<String, Integer>();
 
     private PumpFont() {
     }
 
-    /** The pump's font, or null when the asset could not be read (then the screen just skips text). */
     static synchronized FontRenderer get(Minecraft mc) {
         if (tried) return renderer;
         tried = true;
@@ -83,7 +70,11 @@ final class PumpFont {
         return renderer;
     }
 
-    /** Uploads a PNG straight out of the default resource pack as a GL texture. */
+    /** True once {@link #get(Minecraft)} has run; {@link FramePump} starts only after that. */
+    static boolean isPrepared() {
+        return tried;
+    }
+
     private static int upload(Minecraft mc, ResourceLocation location) throws IOException {
         InputStream in = mc.mcDefaultResourcePack.getInputStream(location);
         if (in == null) return 0;
@@ -96,15 +87,13 @@ final class PumpFont {
             ByteBuffer buf = ByteBuffer.allocateDirect(w * h * 4);
             for (int i = 0; i < px.length; i++) {
                 int argb = px[i];
-                buf.put((byte) ((argb >> 16) & 0xff));  // red
-                buf.put((byte) ((argb >> 8) & 0xff));   // green
-                buf.put((byte) (argb & 0xff));          // blue
-                buf.put((byte) ((argb >>> 24) & 0xff)); // alpha
+                buf.put((byte) ((argb >> 16) & 0xff));
+                buf.put((byte) ((argb >> 8) & 0xff));
+                buf.put((byte) (argb & 0xff));
+                buf.put((byte) ((argb >>> 24) & 0xff));
             }
-            // flip() through a Buffer reference on purpose: Java 9+ made ByteBuffer.flip() return
-            // ByteBuffer, and a class file that names that covariant signature throws
-            // NoSuchMethodError on the Java 8 the game runs on (which is exactly what happened:
-            // "could not build the loading screen font: NoSuchMethodError: java.nio.ByteBuffer.flip").
+            // Through a Buffer reference: Java 9+ made ByteBuffer.flip() covariant, and that signature
+            // NoSuchMethodErrors on the Java 8 this game runs on.
             ((java.nio.Buffer) buf).flip();
             int tex = GL11.glGenTextures();
             GL11.glBindTexture(GL11.GL_TEXTURE_2D, tex);
@@ -118,16 +107,10 @@ final class PumpFont {
         } finally {
             try {
                 in.close();
-            } catch (IOException ignored) {
-                // nothing useful to do
-            }
+            } catch (IOException ignored) { }
         }
     }
 
-    /**
-     * {@code FontRenderer} that reads its glyph widths from the default resource pack and binds our
-     * own texture instead of going through the game's {@code TextureManager}.
-     */
     private static final class OwnRenderer extends FontRenderer {
 
         private final int texture;
@@ -135,7 +118,7 @@ final class PumpFont {
         OwnRenderer(Minecraft mc, int texture) {
             super(mc.gameSettings, ASCII, null, false);
             this.texture = texture;
-            super.onResourceManagerReload(null); // reads the font image through getResourceInputStream
+            super.onResourceManagerReload(null);
         }
 
         @Override
@@ -149,11 +132,6 @@ final class PumpFont {
         }
     }
 
-    /**
-     * The texture to bind for a font resource: our ASCII atlas, or a unicode glyph page uploaded on
-     * first use. A page that cannot be read falls back to the atlas (the text then reads wrong, but
-     * nothing crashes and the next page still works).
-     */
     private static int textureFor(ResourceLocation location) {
         if (ASCII.equals(location)) return texture;
         String key = location.getResourcePath();
@@ -167,8 +145,8 @@ final class PumpFont {
             uploaded = 0;
         }
         if (PAGES.size() >= MAX_PAGES) {
-            // Bounded: a tips file can walk over dozens of CJK pages, and the ones already shown are
-            // not worth keeping forever. Re-uploading a page is cheap enough (a 256x256 image).
+            // All-or-nothing eviction: a page costs one 256x256 upload, so a burst is cheaper than
+            // tracking usage.
             for (Integer id : PAGES.values()) {
                 if (id != null && id.intValue() != 0) GL11.glDeleteTextures(id.intValue());
             }

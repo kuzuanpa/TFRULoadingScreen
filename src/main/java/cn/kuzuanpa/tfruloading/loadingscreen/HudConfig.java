@@ -29,31 +29,13 @@ import java.nio.charset.Charset;
 import java.util.Map;
 
 /**
- * The loading screen's HUD config: the top-left labels, the bottom progress bar and the tips line.
- *
- * <p>This is deliberately <em>not</em> part of a scene. A scene is the film; the HUD is the chrome
- * that sits on top of whatever film is playing, and a modpack author wants to rebrand the loading
- * screen without re-authoring 68 seconds of vector art. So the HUD lives in its own small JSON file:
- *
- * <pre>&lt;gameDir&gt;/config/loadingscreen/loading_screen.json</pre>
- *
- * <p>The file is read <em>once</em>, when the screen initializes (see
- * {@link LoadingScreenManager#begin()}), and the parsed config is then held in memory for the rest of
- * the run: nothing re-reads it, so an edit shows up on the next launch. When the file is missing it is
- * written out from the copy bundled in the jar, so a pack author always has something to edit.
- *
- * <p>Every field is optional: a missing file, a broken file, or a missing key all fall back to the
- * defaults below and never take the loading screen down.
- *
- * <p>Pure Java (no Minecraft imports), like {@link SceneIO}, so the parsing path is the same
- * off-line and in game.
+ * HUD config, read once from {@code config/loadingscreen/loading_screen.json} (written out from the
+ * bundled default when missing).
  */
 public final class HudConfig {
 
-    /** Directory under the game dir that holds the HUD config, the tips and the scenes. */
     public static final String CONFIG_DIR = "config/loadingscreen";
 
-    /** Name of the HUD file inside {@link #CONFIG_DIR}. */
     public static final String FILE_NAME = "loading_screen.json";
 
     private static final String BUNDLED_CONFIG = "/assets/tfruloading/loading_screen.json";
@@ -61,8 +43,6 @@ public final class HudConfig {
 
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final Gson GSON = new Gson();
-
-    // --- defaults (the bundled loading_screen.json carries the same values) --------------------
 
     static final String DEFAULT_STATUS_TEXT = "{status}";
     static final String DEFAULT_PERCENT_TEXT = "{percent}%";
@@ -75,24 +55,21 @@ public final class HudConfig {
     static final float DEFAULT_TIPS_DELAY = 3f;
     static final float DEFAULT_TIPS_CHANGE = 12f;
 
-    /** Scene text node id -> replacement text and/or colour. Missing ids keep the scene's own text. */
     public Map<String, Label> labels;
 
     public Progress progress;
 
     public Tips tips;
 
-    /** One top-left label override: either field may be left out. */
     public static class Label {
         public String text;
         public String color;
     }
 
-    /** Bottom progress bar: the two text templates and the four colours. */
     public static class Progress {
-        /** Template for the left-hand line. {@code {status}} -> the loading status, {@code {percent}}. */
+
         public String statusText;
-        /** Template for the right-hand line. */
+
         public String percentText;
         public String textColor;
         public String borderColor;
@@ -100,19 +77,16 @@ public final class HudConfig {
         public String fillColor;
     }
 
-    /** The tips line (BetterLoadingScreen's tips.txt, ported). */
     public static class Tips {
         public Boolean enabled;
-        /** Path to the tips file; relative paths resolve against {@code config/loadingscreen/}. */
+
         public String file;
         public String color;
-        /** Seconds of loading before the first tip appears. */
+
         public Float delaySeconds;
-        /** Seconds each tip stays on screen. */
+
         public Float changeSeconds;
     }
-
-    // --- resolved values ----------------------------------------------------------------------
 
     public Label label(String nodeId) {
         return labels == null || nodeId == null ? null : labels.get(nodeId);
@@ -172,15 +146,6 @@ public final class HudConfig {
         return value == null || value.floatValue() < 0f ? fallback : value.floatValue();
     }
 
-    // --- loading ------------------------------------------------------------------------------
-
-    /**
-     * Reads the HUD config for a game directory. Called once, at initialization.
-     *
-     * <p>When {@code config/loadingscreen/loading_screen.json} is absent it is written out from the
-     * bundled default, so an author can open it and start editing. Anything that goes wrong here
-     * falls back to the built-in defaults; the loading screen never fails over its HUD.
-     */
     public static HudConfig load(File gameDir) {
         File file = fileFor(gameDir);
         try {
@@ -202,23 +167,19 @@ public final class HudConfig {
         return new HudConfig();
     }
 
-    /** {@code <gameDir>/config/loadingscreen/loading_screen.json}. */
     public static File fileFor(File gameDir) {
         return new File(new File(gameDir, CONFIG_DIR), FILE_NAME);
     }
 
-    /** {@code <gameDir>/config/loadingscreen/scenes}: where the scene files are read from. */
     public static File scenesDirFor(File gameDir) {
         return new File(new File(gameDir, CONFIG_DIR), "scenes");
     }
 
-    /** {@code <gameDir>/config/loadingscreen/<tips.file>}, or the path itself when absolute. */
     public static File tipsFileFor(File gameDir, String name) {
         File raw = new File(name);
         return raw.isAbsolute() ? raw : new File(new File(gameDir, CONFIG_DIR), name);
     }
 
-    /** Reads a text resource bundled in the jar, or null. */
     static String readBundled(String path) {
         InputStream in = HudConfig.class.getResourceAsStream(path);
         if (in == null) return null;
@@ -235,14 +196,13 @@ public final class HudConfig {
         }
     }
 
-    /** The default tips file, bundled for the first run. */
     static String bundledTips() {
         return readBundled(BUNDLED_TIPS);
     }
 
     private static void writeDefault(File file) {
         String text = readBundled(BUNDLED_CONFIG);
-        if (text == null) return; // nothing bundled: the built-in defaults will be used
+        if (text == null) return;
         File parent = file.getParentFile();
         if (parent != null && !parent.isDirectory() && !parent.mkdirs()) return;
         OutputStream out = null;
@@ -261,8 +221,6 @@ public final class HudConfig {
         try {
             if (closeable instanceof InputStream) ((InputStream) closeable).close();
             else if (closeable instanceof OutputStream) ((OutputStream) closeable).close();
-        } catch (IOException ignored) {
-            // nothing useful to do
-        }
+        } catch (IOException ignored) { }
     }
 }

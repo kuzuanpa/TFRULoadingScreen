@@ -16,26 +16,8 @@
 package cn.kuzuanpa.tfruloading.loadingscreen;
 
 /**
- * 实际帧 / 循环帧 director for the loading screen.
- *
- * <p>A scene has two timelines:
- *
- * <ul>
- *   <li><b>actual frames</b> ({@link Scene#tracks}) - the story. It only moves while 额度
- *       (allowance) lasts.</li>
- *   <li><b>loop frames</b> ({@link Scene#loop}) - anvil strike, fire flicker, ... Always plays.</li>
- * </ul>
- *
- * <p>The loading progress bar hands out actual-frame allowance: every bit of progress grants
- * {@code allowancePerProgress} seconds of story (default: the whole scene, so 100% == the whole
- * story). Allowance is spent at a fixed rate ({@code rate}, timeline seconds per wall second).
- * When the bank cannot cover the next step the story stops dead - it never slow-mos - and the loop
- * frames keep the picture alive. A stopped story only resumes once the bank holds
- * {@code resumeSeconds} (default 1s) again, so the pauses read as deliberate beats rather than
- * stutter.
- *
- * <p>The class performs no IO and reads no clock: {@link #tick(float)} is handed the elapsed time, so
- * it is unit-testable off-line.
+ * Two timelines: {@link #actualTime()} follows what the progress bar has paid for (it gates the story),
+ * {@link #loopTime()} follows wall-clock time (it drives the looping background animation).
  */
 public final class Director {
 
@@ -70,14 +52,12 @@ public final class Director {
         this.running = initial > 0f;
     }
 
-    /** Feeds the progress bar. Progress never moves backwards; only climbs grant allowance. */
     public void setProgress(float p) {
         float next = p < 0f ? 0f : p > 1f ? 1f : p;
         if (next > progress) allowance += (next - progress) * allowancePerProgress;
         progress = next;
     }
 
-    /** Advances the wall clock by {@code dt} seconds (progress is fed separately). */
     public void tick(float dt) {
         if (dt < 0f || dt != dt) dt = 0f;
 
@@ -102,7 +82,7 @@ public final class Director {
             actualTime += step;
             allowance -= step;
             if (actualTime > duration) {
-                allowance += actualTime - duration; // hand the overshoot back
+                allowance += actualTime - duration;
                 actualTime = duration;
             }
             if (step < want - 1e-9f || allowance <= 1e-9f) {
@@ -111,7 +91,6 @@ public final class Director {
         }
     }
 
-    /** Loading is done: bank whatever is left so the story always plays out to the end. */
     public void finish() {
         setProgress(1f);
         finished = true;

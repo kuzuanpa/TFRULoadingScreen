@@ -18,43 +18,20 @@ package cn.kuzuanpa.tfruloading.loadingscreen;
 import org.lwjgl.opengl.Display;
 import org.lwjgl.opengl.SharedDrawable;
 
+import java.lang.reflect.Field;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+
 /**
- * Continuous frame pump: a second thread that draws the loading screen while the game thread is busy
- * loading mods, so the loop frames (fire, steam, anvil, spark) keep animating instead of stepping
- * along with the loading progress.
+ * A second thread that keeps the loading screen animating while the game thread loads mods.
  *
- * <h3>Why the first attempt at this failed, and what is different now</h3>
- *
- * <p>The first pump copied Forge's {@code SplashProgress} literally: it made a shared context current
- * on the game thread and handed the <em>display</em> context to the pump thread. On this pack that
- * produced "Tried to get the Tessellator off the main thread when not capturing!" (GTNHLib redirects
- * the Tessellator to a thread-bound manager), drew zero frames in two minutes, and left the game's
- * texture state broken - the game had been uploading its textures and fonts while its GL context was
- * the shared one, so after the switch back the display context's state and the game's own caches no
- * longer agreed.
- *
- * <p>This version never touches the game thread's context at all:
- *
- * <ul>
- *   <li>the game thread keeps the display context for the whole load, exactly as vanilla;</li>
- *   <li>the pump thread makes its own shared context current and draws into it - objects (textures)
- *       are shared with the display context, state is not;</li>
- *   <li>the pump draws with immediate mode ({@code glBegin}/{@code glVertex2f}) and with its own font
- *       texture, so it never touches the Tessellator, the game's {@code TextureManager} or its
- *       {@code FontRenderer} - the three things that made the first attempt explosive;</li>
- *   <li>it swaps with {@code Display.update()}, which in LWJGL 2.9.1 swaps the <em>window</em>
- *       ({@code DrawableGL.swapBuffers()} → {@code glXSwapBuffers}) and does not care which context is
- *       current on which thread;</li>
- *   <li>stopping it is just releasing its own context - there is no handover, so nothing can be left
- *       half-switched for the game.</li>
- * </ul>
- *
- * <p>Everything degrades: no display, no {@code SharedDrawable}, or {@code -Dtfruloading.pump=false}
- * and the mod keeps rendering from the game thread on every lifecycle event and progress-bar step.
+ * <p>It draws into its own shared GL context with its own font, and never touches the game thread's
+ * context, texture manager or font. Two rules it must keep: it may never be the first thread to load
+ * a class (see {@link LoadingScreenManager#begin()}), and it may never take the display over from the
+ * game thread - hence a shared context rather than Forge's context hand-over.
  */
 public final class FramePump {
 
-    /** Loop frames read well at 60 fps; the renderer is immediate mode and cheap. */
     private static final int TARGET_FPS = 60;
     private static final long FRAME_NANOS = 1000000000L / TARGET_FPS;
     private static final long STOP_TIMEOUT_MS = 3000L;
@@ -64,11 +41,10 @@ public final class FramePump {
     private static volatile boolean running;
     private static volatile boolean retired;
     private static Thread thread;
-    private static SharedDrawable drawable;
+    private static boolean splashMutexTried;
+    private static Semaphore splashMutex;
     private static long frames;
     private static long startedNanos;
-    private static int startWidth;
-    private static int startHeight;
     private static boolean reportedDrawFailure;
     private static boolean reportedSwapFailure;
 
@@ -80,8 +56,8 @@ public final class FramePump {
     }
 
     /**
-     * Starts the pump on the game thread. Idempotent, and safe to call before the game has drawn
-     * anything: the pump only ever asks for its own context.
+     * Starts the pump on the game thread; {@code -Dtfruloading.pump=false} or a failed GL context
+     * leaves it off and the game thread draws instead.
      */
     public static boolean start() {
         synchronized (LOCK) {
@@ -94,13 +70,19 @@ public final class FramePump {
                 return false;
             }
             if (!Display.isCreated()) return false;
+            if (!PumpFont.isPrepared()) {
+                retired = true;
+                System.err.println("[tfruloading] the pump font was not prepared on the game thread,"
+                        + " so starting the pump would make it the first thread to load FontRenderer"
+                        + " (and with it the pack's whole transformer chain); leaving the pump off."
+                        + " Frames will come from mod lifecycle events and progress-bar steps only");
+                return false;
+            }
 
+            final SharedDrawable ownedDrawable;
             try {
-                // Created on the game thread (that is where the display lives) but never made current
-                // here: the pump thread makes it current for itself.
-                drawable = new SharedDrawable(Display.getDrawable());
+                ownedDrawable = new SharedDrawable(Display.getDrawable());
             } catch (Throwable t) {
-                drawable = null;
                 System.err.println("[tfruloading] no second GL context (" + t
                         + "); frames will come from the game thread only");
                 return false;
@@ -109,12 +91,10 @@ public final class FramePump {
             running = true;
             frames = 0L;
             startedNanos = System.nanoTime();
-            startWidth = Display.getWidth();
-            startHeight = Display.getHeight();
             thread = new Thread(new Runnable() {
                 @Override
                 public void run() {
-                    pump();
+                    pump(ownedDrawable);
                 }
             }, "TFRU loading screen");
             thread.setDaemon(true);
@@ -126,7 +106,10 @@ public final class FramePump {
         }
     }
 
-    /** Stops the pump and lets it release its own context. Call from the game thread. */
+    /**
+     * Stops the pump. The thread owns its drawable and releases its context by itself, so a thread
+     * still stuck in a frame is only reported, never yanked.
+     */
     public static void stop() {
         Thread pumpThread;
         synchronized (LOCK) {
@@ -143,9 +126,10 @@ public final class FramePump {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
-        }
-        synchronized (LOCK) {
-            drawable = null;
+            if (pumpThread.isAlive()) {
+                System.err.println("[tfruloading] the frame pump thread is still inside a frame after "
+                        + STOP_TIMEOUT_MS + "ms; it will release its own GL context when it finishes");
+            }
         }
 
         if (startedNanos != 0L) {
@@ -156,23 +140,9 @@ public final class FramePump {
         }
     }
 
-    /**
-     * True when the window is a different size than it was when the pump took over.
-     *
-     * <p>The game thread cannot answer this itself: while the pump runs it is the pump that consumes
-     * the window's resize events (through {@code Display.update()}), so {@code Minecraft}'s own size
-     * fields and its off-screen framebuffer would silently stay at the old size. The game has to be
-     * realigned at handover - see {@code LoadingScreenManager.abandon()}.
-     */
-    public static boolean windowResizedSinceStart() {
-        return startWidth > 0 && Display.isCreated()
-                && (Display.getWidth() != startWidth || Display.getHeight() != startHeight);
-    }
-
-    /** The pump thread: take our own context, draw until told to stop, release it again. */
-    private static void pump() {
+    private static void pump(SharedDrawable owned) {
         try {
-            drawable.makeCurrent();
+            owned.makeCurrent();
         } catch (Throwable t) {
             running = false;
             System.err.println("[tfruloading] frame pump could not take its context: " + t
@@ -183,6 +153,14 @@ public final class FramePump {
         try {
             while (running) {
                 long began = System.nanoTime();
+
+                // Drain the window's event queue here, then swap without processing messages again
+                // (see swapBuffers): it keeps the window responsive and picks a resize up this frame.
+                try {
+                    Display.processMessages();
+                } catch (Throwable t) {
+                    reportSwapFailure(t);
+                }
 
                 try {
                     LoadingScreenManager.renderFrame(true);
@@ -196,12 +174,9 @@ public final class FramePump {
                 }
 
                 try {
-                    Display.update();
+                    swapBuffers();
                 } catch (Throwable t) {
-                    if (!reportedSwapFailure) {
-                        reportedSwapFailure = true;
-                        System.err.println("[tfruloading] frame pump could not swap buffers: " + t);
-                    }
+                    reportSwapFailure(t);
                 }
 
                 long rest = FRAME_NANOS - (System.nanoTime() - began);
@@ -216,10 +191,46 @@ public final class FramePump {
             }
         } finally {
             try {
-                drawable.releaseContext();
+                owned.releaseContext();
             } catch (Throwable ignored) {
-                // detaching our own context cannot hurt the game's context
             }
         }
+    }
+
+    private static void swapBuffers() throws InterruptedException {
+        Semaphore mutex = splashMutex();
+        if (mutex == null) {
+            Display.update(false);
+            return;
+        }
+
+        while (running && !mutex.tryAcquire(200L, TimeUnit.MILLISECONDS)) { }
+        if (!running) return;
+        try {
+            Display.update(false);
+        } finally {
+            mutex.release();
+        }
+    }
+
+    private static synchronized Semaphore splashMutex() {
+        if (splashMutexTried) return splashMutex;
+        splashMutexTried = true;
+        try {
+            Field field = Class.forName("cpw.mods.fml.client.SplashProgress").getDeclaredField("mutex");
+            field.setAccessible(true);
+            splashMutex = (Semaphore) field.get(null);
+        } catch (Throwable t) {
+            splashMutex = null;
+            System.out.println("[tfruloading] Forge's splash display mutex is not reachable (" + t
+                    + "); the frame pump will swap without it");
+        }
+        return splashMutex;
+    }
+
+    private static void reportSwapFailure(Throwable t) {
+        if (reportedSwapFailure) return;
+        reportedSwapFailure = true;
+        System.err.println("[tfruloading] frame pump could not update the window: " + t);
     }
 }

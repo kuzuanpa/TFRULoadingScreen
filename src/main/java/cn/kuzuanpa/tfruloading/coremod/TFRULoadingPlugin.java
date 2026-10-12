@@ -21,15 +21,9 @@ import java.io.File;
 import java.util.Map;
 
 /**
- * Coremod entry point for the TFRU loading screen.
- *
- * <p>Modelled on the loading-screen replacement used by BetterLoadingScreen: the coremod exists only
- * to (a) hand the ASM transformer to FML and (b) disable Forge's own splash before
- * {@code SplashProgress.start()} reads {@code config/splash.properties}. With Forge's splash off,
- * {@code SplashProgress.drawVanillaScreen()} calls {@code Minecraft.loadScreen()}, whose body the
- * transformer replaces with our own first frame.
- *
- * <p>{@link #getModContainerClass()} returns null because this is also a regular {@code @Mod}.
+ * Coremod entry point: hands the transformer to FML and turns Forge's splash off before
+ * {@code SplashProgress.start()} reads the config. It is also a regular {@code @Mod}
+ * ({@code getModContainerClass()} returns null).
  */
 @IFMLLoadingPlugin.MCVersion("1.7.10")
 @IFMLLoadingPlugin.TransformerExclusions({ "cn.kuzuanpa.tfruloading.coremod" })
@@ -51,14 +45,12 @@ public class TFRULoadingPlugin implements IFMLLoadingPlugin {
         return null;
     }
 
+    /** Runs on the launcher's working directory (the instance) before SplashProgress.start(). */
     @Override
     public void injectData(Map<String, Object> data) {
         try {
-            // Must happen before SplashProgress.start() reads the file. The launcher runs the game
-            // with the instance directory as the working directory, which is where mcDataDir lives.
             cn.kuzuanpa.tfruloading.loadingscreen.SplashConfig.disableForgeSplash(new File("."));
         } catch (Throwable ignored) {
-            // non fatal: the runtime will also try once Minecraft is up
         }
     }
 

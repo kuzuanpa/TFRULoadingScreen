@@ -25,30 +25,16 @@ import java.lang.reflect.Field;
 import java.util.Properties;
 
 /**
- * Turns Forge's own splash screen off so the TFRU scene owns the window.
- *
- * <p>Two independent levers, both needed:
- * <ul>
- *   <li>{@code config/splash.properties: enabled=false} — read by
- *       {@code SplashProgress.start()} during {@code Minecraft.startGame()}. Must be written before
- *       that, i.e. from the coremod's {@code injectData}.</li>
- *   <li>reflective {@code SplashProgress.enabled=false, done=true} — stops an already-running splash
- *       thread in case the properties file still said {@code enabled=true}.</li>
- * </ul>
+ * Turns Forge's splash screen off so the scene owns the window: {@code config/splash.properties} for
+ * {@code SplashProgress.start()}, plus a reflective fallback for when the file cannot be written or is
+ * read too late.
  */
 public final class SplashConfig {
 
     private SplashConfig() {
     }
 
-    /**
-     * Ensures {@code <gameDir>/config/splash.properties} exists and has {@code enabled=false}.
-     *
-     * <p>Creating the file when missing matters: Forge's {@code SplashProgress.start()} writes a
-     * default file with {@code enabled=true} if it is absent, and then
-     * {@code drawVanillaScreen()} would never call {@code Minecraft.loadScreen()} — so our first
-     * frame would never be drawn. Must run before {@code SplashProgress.start()}.
-     */
+    /** Must run before {@code SplashProgress.start()}, i.e. from the coremod's injectData(). */
     public static boolean disableForgeSplash(File gameDir) {
         File file = new File(new File(gameDir, "config"), "splash.properties");
 
@@ -66,12 +52,14 @@ public final class SplashConfig {
         }
 
         if ("false".equalsIgnoreCase(props.getProperty("enabled", "true"))) {
-            return false; // already off, nothing to do
+            return false;
         }
         props.setProperty("enabled", "false");
 
         File parent = file.getParentFile();
         if (parent != null && !parent.isDirectory() && !parent.mkdirs()) {
+            System.err.println("[tfruloading] could not create " + parent
+                    + "; Forge's splash will have to be forced off reflectively");
             return false;
         }
 
@@ -81,30 +69,37 @@ public final class SplashConfig {
             props.store(out, "disabled by TFRU Loading Screen");
             return true;
         } catch (IOException e) {
+            System.err.println("[tfruloading] could not write " + file + ": " + e
+                    + "; Forge's splash will have to be forced off reflectively");
             return false;
         } finally {
             closeQuietly(out);
         }
     }
 
-    /** Reflectively stops Forge's splash thread if it is already running. */
     public static void forceDisableForgeSplash() {
         try {
             Class<?> splash = Class.forName("cpw.mods.fml.client.SplashProgress");
-            setStatic(splash, "enabled", Boolean.FALSE);
-            setStatic(splash, "done", Boolean.TRUE);
-        } catch (Throwable ignored) {
-            // SplashProgress is optional/renamed: the scene still draws either way.
-        }
+            boolean enabled = setStatic(splash, "enabled", Boolean.FALSE);
+            boolean done = setStatic(splash, "done", Boolean.TRUE);
+            if (enabled || done) {
+                System.out.println("[tfruloading] Forge's splash had to be forced off reflectively"
+                        + " (enabled=" + enabled + ", done=" + done + "); check that"
+                        + " config/splash.properties is writable and says enabled=false");
+            }
+        } catch (Throwable ignored) { }
     }
 
-    private static void setStatic(Class<?> owner, String name, Object value) {
+    private static boolean setStatic(Class<?> owner, String name, Object value) {
         try {
             Field f = owner.getDeclaredField(name);
             f.setAccessible(true);
+            if (value.equals(f.get(null))) return false;
             f.set(null, value);
+            return true;
         } catch (Throwable ignored) {
-            // field missing on this Forge build
+
+            return false;
         }
     }
 
@@ -112,8 +107,6 @@ public final class SplashConfig {
         try {
             if (closeable instanceof InputStream) ((InputStream) closeable).close();
             else if (closeable instanceof OutputStream) ((OutputStream) closeable).close();
-        } catch (IOException ignored) {
-            // nothing useful to do
-        }
+        } catch (IOException ignored) { }
     }
 }

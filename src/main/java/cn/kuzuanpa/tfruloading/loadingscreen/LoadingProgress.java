@@ -32,16 +32,8 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Drives the loading screen's progress bar from FML's mod lifecycle.
- *
- * <p>FML posts each state event on the *per-mod* Guava event bus stored in
- * {@code FMLModContainer.eventBus}, so we register a listener on every mod's bus to get one progress
- * tick per mod per phase. That is the same source BetterLoadingScreen uses; it is coarse but it is
- * the only per-mod signal FML exposes without transforming FML itself.
- *
- * <p>These handlers feed the bar and hand {@link LoadingScreenManager} a frame opportunity. The
- * other frame source is FML's own progress bars, which the coremod hooks - see
- * {@code LoadingScreenBridge.pumpFrame()} and ROADMAP §2.13.
+ * Feeds the progress bar from FML's mod lifecycle. FML posts those events on each mod's own Guava bus,
+ * so this registers a listener on every mod's bus to get one tick per mod per phase.
  */
 public final class LoadingProgress {
 
@@ -52,17 +44,10 @@ public final class LoadingProgress {
             "Construction", "Pre-initialization", "Initialization", "Post-initialization"
     };
 
-    /**
-     * Where each phase starts, as a fraction of the bar. Construction and Pre-initialization are what
-     * happens while the TFRU pack discovers and builds its 150 mods; the last slice is banked by
-     * {@link #onLoadComplete} so the bar only reads 100% when the game is really done.
-     */
     private static final float[] BASE = { 0.00f, 0.08f, 0.45f, 0.78f, 0.96f };
 
-    private static int total = 1;
-
-    /** null for the instance registered on the global FML bus (load-complete only). */
     private final ModContainer mod;
+
     private final int index;
 
     private LoadingProgress(ModContainer mod, int index) {
@@ -70,12 +55,12 @@ public final class LoadingProgress {
         this.index = index;
     }
 
+    /** Called once from the mod's construction event; best-effort - failure only costs progress text. */
     public static void attach() {
         if (!ATTACHED.compareAndSet(false, true)) return;
 
         try {
             List<ModContainer> mods = Loader.instance().getActiveModList();
-            total = Math.max(1, mods.size());
             int i = 0;
             for (ModContainer mod : mods) {
                 i++;
@@ -86,9 +71,7 @@ public final class LoadingProgress {
                     EventBus bus = (EventBus) field.get(mod);
                     if (bus == null) continue;
                     bus.register(new LoadingProgress(mod, i));
-                } catch (Throwable ignored) {
-                    // this mod's bus is not reachable; it just will not tick the bar
-                }
+                } catch (Throwable ignored) { }
             }
         } catch (Throwable t) {
             System.err.println("[tfruloading] could not attach per-mod progress listeners: " + t);
@@ -96,9 +79,7 @@ public final class LoadingProgress {
 
         try {
             FMLCommonHandler.instance().bus().register(new LoadingProgress(null, 0));
-        } catch (Throwable ignored) {
-            // non fatal
-        }
+        } catch (Throwable ignored) { }
     }
 
     @Subscribe
@@ -129,10 +110,20 @@ public final class LoadingProgress {
     }
 
     private void report(int phase) {
-        if (mod == null) return; // global-bus instance: load-complete only
+        if (mod == null) return;
         float from = BASE[phase];
         float to = BASE[phase + 1];
-        float within = index / (float) total;
+        float within = position() / (float) size();
         LoadingScreenManager.setProgress(PHASES[phase] + ": " + mod.getName(), from + (to - from) * within);
+    }
+
+    /** Read live: the active mod list is still being built while construction is being dispatched. */
+    private int position() {
+        int index = Loader.instance().getActiveModList().indexOf(mod);
+        return index >= 0 ? index : this.index - 1;
+    }
+
+    private static int size() {
+        return Math.max(1, Loader.instance().getActiveModList().size());
     }
 }
